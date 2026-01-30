@@ -328,6 +328,7 @@ rm -rf ~/shepard-data/*
 - No SSL/TLS encryption
 - Default passwords should be changed for production
 - Keycloak runs in development mode (`start-dev`)
+- Persistant storage for Keyclock and other containers
 
 
 This setup guide was created to document the local installation process for Shepard on Windows 11 with WSL2. It is based on the official Shepard deployment documentation and adapted for Windows/WSL environments.
