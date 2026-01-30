@@ -1,30 +1,34 @@
 from taipy.gui import Gui, notify
+
 from pages.home.home_page import home_md
 from pages.login_page import root
+from utils.keycloak_manager import KeycloakManager
 
 login_open = True
+access_token = None
 username = ''
 password = ''
 
-def create_account(state):
-    notify(state, "info", "Creating account...")
-    # Put your own logic to create an account
-    # Maybe, by opening another dialog
-    state.username = "Taipy"
-    state.password = "password"
-    notify(state, "success", "Account created!")
+# Initialize KeycloakManager once
+keycloak_manager = KeycloakManager()
 
 
 def login(state):
-    if state.username == "Taipy" and state.password == "password":
+    """Handle user login using KeycloakManager."""
+    token = keycloak_manager.check_login_with_keycloak(state.username, state.password)
+
+    if token:
         state.login_open = False
-        notify(state, "success", "Logged in!")
+        state.access_token = token["access_token"]
+        notify(state, "success", f"Logged in successfully!")
     else:
-        notify(state, "error", "Wrong username or password!")
+        notify(state, "error", "Invalid username or password!")
 
 
-pages = {"/": root,
-         "Home": home_md}
+pages = {
+    "/": root,
+    "Home": home_md
+}
 
 if __name__ == "__main__":
     Gui(pages=pages).run()
