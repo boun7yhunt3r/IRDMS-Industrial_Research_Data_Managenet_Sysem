@@ -1,4 +1,5 @@
 from keycloak import KeycloakOpenID
+from taipy.gui import Gui, notify
 from dotenv import load_dotenv
 import os
 
@@ -37,3 +38,61 @@ class KeycloakManager:
             return token
         except Exception:
             return None
+
+    def is_token_valid(self, access_token):
+        if not access_token:
+            return False
+        
+        try:
+            # Use userinfo instead of introspect for public clients
+            userinfo = self.keycloak_client.userinfo(access_token)
+            return True
+        except Exception as e:
+            return False
+        
+    def check_session_and_logout_if_expired(self, state):
+        """
+        Check if user session is still valid. If expired, log them out.
+        Call this method on user interactions to verify session validity.
+        
+        Args:
+            state: Taipy state object
+            
+        Returns:
+            bool: True if session is valid, False if expired and logged out
+        """
+        # If user is not logged in, nothing to check
+        if state.login_open or not state.access_token:
+            return False
+        
+        # Check if token is still valid
+        if not self.is_token_valid(state.access_token):
+            # Token expired, log user out
+            state.login_open = True
+            state.access_token = None
+            state.username = ""
+            state.password = ""
+            notify(state, "warning", "Your session has expired. Please log in again.")
+            return False
+        
+        return True
+        
+    def login(self, state):
+        """Handle user login using Keycloak."""
+        token = self.check_login_with_keycloak(state.username, state.password)
+
+        if token:
+            state.login_open = False
+            state.access_token = token["access_token"]
+            notify(state, "success", "Logged in successfully!")
+        else:
+            notify(state, "error", "Invalid username or password!")
+
+    def logout(self, state):
+        """Reset session and return user to login page."""
+        state.login_open = True
+        state.access_token = None
+        state.username = ""
+        state.password = ""
+
+        notify(state, "success", "You have been logged out!")
