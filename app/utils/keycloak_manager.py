@@ -1,10 +1,17 @@
 from keycloak import KeycloakOpenID
+from neo4j_viz import VisualizationGraph
 from taipy.gui import Gui, notify
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
+# Initialize with a default empty graph instead of None
+class NeoGraphWrapper:
+    def __init__(self, nodes=None, relationships=None):
+        self.viz = VisualizationGraph(nodes or [], relationships or [])
+
+# Initialize with empty graph to prevent None errors
 
 class KeycloakManager:
     """Manages Keycloak authentication."""
@@ -97,5 +104,7 @@ class KeycloakManager:
         state.username = ""
         state.password = ""
         state.logged_in_user = ""
-
+        state.tree_data = []
+        state.references = {}
+        state.home_graph = NeoGraphWrapper([], [])
         notify(state, "success", "You have been logged out!")

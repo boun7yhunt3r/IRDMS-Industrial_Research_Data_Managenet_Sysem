@@ -2,10 +2,17 @@ from shepard_client.api_client import ApiClient
 from shepard_client.configuration import Configuration
 from shepard_client.api.collection_api import CollectionApi
 from shepard_client.api.data_object_api import DataObjectApi
+from shepard_client.models.data_object_reference import DataObjectReference
+from shepard_client.api.data_object_reference_api import DataObjectReferenceApi
 from shepard_client.models.collection import Collection
 from shepard_client.models.data_object import DataObject
+
 from dotenv import load_dotenv
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import colorsys
+import hashlib
+from neo4j_viz import Node, Relationship
 
 from taipy.gui import notify
 from utils.logger import logger
@@ -32,6 +39,7 @@ class ShepardManager:
         self.client = None
         self.collection_api = None
         self.dataobject_api = None
+        self.datareference_api = None
         
         if access_token:
             self._initialize_client(access_token)
@@ -55,6 +63,7 @@ class ShepardManager:
         # Initialize API instances
         self.collection_api = CollectionApi(self.client)
         self.dataobject_api = DataObjectApi(self.client)
+        self.datareference_api = DataObjectReferenceApi(self.client)
     
     def set_access_token(self, access_token):
         """
@@ -362,60 +371,156 @@ class ShepardManager:
         
     def build_tree_structure(self):
         """
-        Build a Taipy-compatible tree with infinite hierarchical depth,
-        adding a 'path' key for each node to trace full parent path.
-        Also prints DataObject attributes for debugging parent field.
+        Optimized multi-level tree builder:
+        - O(n) indexing for fast child lookup.
+        - Parallel reference fetching.
+        - Supports infinite depth.
         """
         logger.info("Building tree structure from ShepardDB")
 
         collections = self.get_all_collections()
-        if collections is None:
+        if not collections:
             logger.error("Failed to retrieve collections!")
             return []
 
         tree_data = []
 
-        def build_dataobject_tree(objects, parent_id=None, parent_path=""):
-            """Recursively build a nested tree of data objects with parent path."""
-            children = []
-
-            for obj in objects:
-
-                # === Determine parent ID dynamically ===
-                obj_parent_id = getattr(obj, "parentId", None) or getattr(obj, "parent_id", None)
-
-                if obj_parent_id == parent_id:
-                    current_path = f"{parent_path} → {obj.name}" if parent_path else obj.name
-                    node = {
-                        "id": obj.id,
-                        "label": obj.name,
-                        "children": build_dataobject_tree(objects, parent_id=obj.id, parent_path=current_path),
-                        "type": "data_object",
-                        "path": current_path
-                    }
-                    children.append(node)
-
-            return children
-
-        # Build tree for each collection
         for col in collections:
             logger.info(f"Processing collection: {col.name}")
+            col_attr = getattr(col, "attributes", {})
 
-            data_objects = self.get_all_data_objects(col.id)
-            if data_objects is None:
-                data_objects = []
+            # Fetch all objects
+            data_objects = self.get_all_data_objects(col.id) or []
 
-            # Root path starts with collection name
-            hierarchy = build_dataobject_tree(data_objects, parent_id=None, parent_path=col.name)
+            if not data_objects:
+                tree_data.append({
+                    "id": col.id,
+                    "label": col.name,
+                    "children": [],
+                    "type": "collection",
+                    "path": col.name,
+                    "attributes": col_attr,
+                })
+                continue
 
+            # --- STEP 1: Index objects by parent_id ---
+            children_index = {}
+            for obj in data_objects:
+                parent_id = getattr(obj, "parentId", getattr(obj, "parent_id", None))
+                children_index.setdefault(parent_id, []).append(obj)
+
+            # --- STEP 2: Parallel reference fetching ---
+            reference_cache = {}
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_id = {
+                    executor.submit(self.datareference_api.get_all_data_object_references, col.id, obj.id): obj.id
+                    for obj in data_objects
+                }
+                for future in as_completed(future_to_id):
+                    obj_id = future_to_id[future]
+                    try:
+                        reference_cache[obj_id] = future.result() or []
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch references for {obj_id}: {e}")
+                        reference_cache[obj_id] = []
+
+            # --- STEP 3: Iterative tree building ---
+            root_nodes = children_index.get(None, [])
+            hierarchy = []
+            stack = [(root, col.name, hierarchy) for root in reversed(root_nodes)]  # reverse for correct order
+
+            while stack:
+                obj, parent_path, container = stack.pop()
+                current_path = f"{parent_path} → {obj.name}" if parent_path else obj.name
+                children_objs = children_index.get(obj.id, [])
+
+                node_dict = {
+                    "id": obj.id,
+                    "label": obj.name,
+                    "children": [],
+                    "type": "data_object",
+                    "path": current_path,
+                    "references": reference_cache.get(obj.id, []),
+                    "attributes": getattr(obj, "attributes", {}),
+                }
+
+                container.append(node_dict)
+
+                for child in reversed(children_objs):
+                    stack.append((child, current_path, node_dict["children"]))
+
+            # --- STEP 4: Append collection root ---
             tree_data.append({
                 "id": col.id,
                 "label": col.name,
                 "children": hierarchy,
                 "type": "collection",
-                "path": col.name
+                "path": col.name,
+                "attributes": col_attr,
             })
 
-        return tree_data
+        return tree_data, reference_cache
 
-    
+    # ----------------- GRAPH CREATION -----------------
+    def create_graph_from_data(self, tree_data, reference_cache):
+        """
+        Build Neo4j graph from tree data.
+        - Iterative traversal (no recursion limits)
+        - Deterministic node colors with caching
+        - Creates edges for parent-child and references
+        """
+        nodes = []
+        edges = []
+        node_id_map = {}
+
+        # --- Color cache ---
+        color_cache = {}
+
+        def color_from_string(s: str):
+            if s in color_cache:
+                return color_cache[s]
+
+            h = hashlib.sha256(s.encode()).hexdigest()
+            hue = int(h[:4], 16) % 360
+            saturation = 0.5 + (int(h[4:6], 16) / 255.0) * 0.2
+            lightness = 0.45 + (int(h[6:8], 16) / 255.0) * 0.1
+            r, g, b = colorsys.hls_to_rgb(hue / 360.0, lightness, saturation)
+            hex_color = f"#{int(r*255):02X}{int(g*255):02X}{int(b*255):02X}"
+            color_cache[s] = hex_color
+            return hex_color
+
+        # --- Iterative tree traversal ---
+        stack = [(root, None) for root in reversed(tree_data)]
+
+        while stack:
+            item, parent_id = stack.pop()
+            attrs = item.get("attributes", {})
+            node_type = attrs.get("object_type", "Default")
+            color = color_from_string(node_type)
+
+            node = Node(id=item["id"], caption=item["label"], color=color)
+            nodes.append(node)
+            node_id_map[item["id"]] = node
+
+            # Parent-child edges
+            if parent_id is not None:
+                edge_name = attrs.get("edge")
+                edges.append(Relationship(source=parent_id, target=item["id"], caption=edge_name, color="#9E9E9E"))
+
+            # Add children to stack
+            for child in reversed(item.get("children", [])):
+                stack.append((child, item["id"]))
+
+            # Reference edges
+            if item.get("type") == "data_object" and item["id"] in reference_cache:
+                for ref in reference_cache[item["id"]]:
+                    edges.append(
+                        Relationship(
+                            source=ref.data_object_id,
+                            target=ref.referenced_data_object_id,
+                            caption=ref.relationship,
+                            color="#3F51B5"
+                        )
+                    )
+
+        return nodes, edges

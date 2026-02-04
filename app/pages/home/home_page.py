@@ -4,6 +4,10 @@ from utils.shepard_connect import ShepardManager
 
 user_menu_open = False
 selected_item = None
+
+# Function to return HTML content as bytes
+graph_html = '<iframe src="/graph.html" width="100%" height="600px" frameborder="0"></iframe>'
+
 def toggle_user_menu(state):
     """Toggle the user menu dialog."""
     state.user_menu_open = not state.user_menu_open

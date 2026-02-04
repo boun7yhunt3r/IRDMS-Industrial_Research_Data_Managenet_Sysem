@@ -14,9 +14,21 @@
 <br/>
 <|Logout|button|on_action=logout|class_name=error fullwidth|>
 |>
-
-<|layout|columns=3 7|gap=20px|
-<|{selected_item}|tree|lov={tree_data}|>
+<|layout|columns=2 5 3|gap=20px|
 <|
+## **Browse**{: .color-primary} Data
+<|{selected_item}|tree|lov={tree_data}|>
+|>
+<|
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<|part|content={home_graph}|height=500px|>
+|>
+<|
+<br/>
+<br/>
 |>
 |>
